@@ -33,6 +33,16 @@
  * }
  *
  */
+
+#include <aws/core/Aws.h>
+#include <aws/core/utils/logging/LogLevel.h>
+#include <aws/core/utils/stream/PreallocatedStreamBuf.h>
+#include <aws/s3-crt/S3CrtClient.h>
+#include <aws/s3-crt/model/GetObjectRequest.h>
+#include <aws/s3-crt/model/PutObjectRequest.h>
+#include <aws/s3-crt/model/GetBucketLocationRequest.h>
+#include <aws/s3-crt/model/HeadObjectRequest.h>
+
 #include <dgl/graph_op.h>
 #include <dgl/immutable_graph.h>
 #include <dgl/runtime/container.h>
@@ -119,10 +129,103 @@ bool SaveHeteroGraphs(std::string filename, List<HeteroGraphData> hdata,
   return true;
 }
 
+void parseS3Path(const std::string &fname, std::string *bucket,
+                 std::string *object) {
+  if (fname.empty()) {
+    throw std::invalid_argument{"The filename cannot be an empty string."};
+  }
+
+  if (fname.size() < 5 || fname.substr(0, 5) != "s3://") {
+    throw std::invalid_argument{
+            "The filename must start with the S3 scheme."};
+  }
+
+  std::string path = fname.substr(5);
+
+  if (path.empty()) {
+    throw std::invalid_argument{"The filename cannot be an empty string."};
+  }
+
+  auto pos = path.find_first_of('/');
+  if (pos == 0) {
+    throw std::invalid_argument{
+            "The filename does not contain a bucket name."};
+  }
+
+  *bucket = path.substr(0, pos);
+  *object = path.substr(pos + 1);
+  if (pos == std::string::npos) {
+    *object = "";
+  }
+}
+
+std::shared_ptr<Aws::S3Crt::S3CrtClient> getS3Client() {
+  Aws::SDKOptions options;
+  Aws::InitAPI(options);
+
+  Aws::S3Crt::ClientConfiguration cfg;
+
+  // S3 Streaming Constants.
+  // Defaults for p3.8xlarge in us-east-1. needs to be adapted by python client
+  cfg.throughputTargetGbps = 5; // Set for p3.8xlarge with 10Gbps card
+  cfg.partSize = 16 * 1024 * 1024;  // 16 MB.
+  cfg.region = "us-east-1";
+
+  return std::shared_ptr<Aws::S3Crt::S3CrtClient>(new Aws::S3Crt::S3CrtClient(cfg));
+}
+
+std::istream& s3_read_crt(const std::string &file_url, std::uint64_t &elapsed_seconds) {
+
+  std::string bucket, object;
+  parseS3Path(file_url, &bucket, &object);
+
+  Aws::S3Crt::Model::GetObjectRequest request;
+  request.SetBucket(std::move(bucket));
+  request.SetKey(std::move(object));
+
+  auto start = std::chrono::steady_clock::now();
+
+  Aws::S3Crt::Model::GetObjectOutcome getObjectOutcome = getS3Client()->GetObject(request);
+
+  auto finish = std::chrono::steady_clock::now();
+  elapsed_seconds = std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count();
+
+  if (getObjectOutcome.IsSuccess()) {
+    auto outcome = getObjectOutcome.GetResultWithOwnership();
+    return outcome.GetBody();
+  }
+  else {
+    return NULL;
+  }
+}
+
+std::uint64_t get_object_size(const std::string &bucket,
+                              const std::string &object) {
+  Aws::S3Crt::Model::HeadObjectRequest headObjectRequest;
+  headObjectRequest.WithBucket(bucket.c_str()).WithKey(object.c_str());
+  auto headObjectOutcome = getS3Client()->HeadObject(headObjectRequest);
+  if (headObjectOutcome.IsSuccess()) {
+    return headObjectOutcome.GetResult().GetContentLength();
+  }
+  Aws::String const &error_aws = headObjectOutcome.GetError().GetMessage();
+  std::string error_str(error_aws.c_str(), error_aws.size());
+  throw std::invalid_argument(error_str);
+  return 0;
+}
+
+std::uint64_t get_object_size(const std::string &file_url){
+  std::string bucket, object;
+  parseS3Path(file_url, &bucket, &object);
+  return get_object_size(bucket, object);
+}
+
 std::vector<HeteroGraphData> LoadHeteroGraphs(const std::string &filename,
                                               std::vector<dgl_id_t> idx_list) {
-  auto fs = std::unique_ptr<SeekStream>(
-    SeekStream::CreateForRead(filename.c_str(), false));
+  std::uint64_t elapsed_seconds;
+  auto ret = s3_read_crt(filename, elapsed_seconds);
+//  auto fs = std::unique_ptr<SeekStream>(
+//    SeekStream::CreateForRead(filename.c_str(), false));
+
   CHECK(fs) << "File name " << filename << " is not a valid name";
   // Read DGL MetaData
   uint64_t magicNum, graphType, version, num_graph;

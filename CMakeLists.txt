@@ -32,7 +32,7 @@ dgl_option(USE_FP16 "Build with fp16 support to enable mixed precision training"
 dgl_option(USE_TVM "Build with TVM kernels" OFF)
 dgl_option(BUILD_CPP_TEST "Build cpp unittest executables" OFF)
 dgl_option(LIBCXX_ENABLE_PARALLEL_ALGORITHMS "Enable the parallel algorithms library. This requires the PSTL to be available." OFF)
-dgl_option(USE_S3 "Build with S3 support" OFF)
+dgl_option(USE_S3 "Build with S3 support" ON)
 dgl_option(USE_HDFS "Build with HDFS support" OFF) # Set env HADOOP_HDFS_HOME if needed
 dgl_option(REBUILD_LIBXSMM "Clean LIBXSMM build cache at every build" OFF) # Set env HADOOP_HDFS_HOME if needed
 dgl_option(USE_EPOLL "Build with epoll for socket communicator" OFF)
@@ -278,7 +278,11 @@ if (LIBCXX_ENABLE_PARALLEL_ALGORITHMS)
   add_definitions(-DPARALLEL_ALGORITHMS)
 endif(LIBCXX_ENABLE_PARALLEL_ALGORITHMS)
 
-target_link_libraries(dgl ${DGL_LINKER_LIBS} ${DGL_RUNTIME_LINKER_LIBS})
+find_package(OpenSSL REQUIRED)
+find_package(AWSSDK REQUIRED COMPONENTS s3 transfer s3-crt)
+
+target_link_libraries(dgl ${DGL_LINKER_LIBS} ${DGL_RUNTIME_LINKER_LIBS} ${AWSSDK_LINK_LIBRARIES} ${AWSSDK_PLATFORM_DEPS})
+
 if(MSVC)
   add_custom_command(
     TARGET dgl POST_BUILD COMMAND
